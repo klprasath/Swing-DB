@@ -6,21 +6,18 @@ import json
 import psycopg2
 from psycopg2 import Error
 from datetime import datetime
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
 import logging
 import csv
 from io import StringIO
+import requests
 
 class NSEDownloadExtract:
     def __init__(self, download_path=r"C:\Python Code\Files", headless=False):
         self.download_path = download_path
         self.headless = headless
         self.driver = None
-        self.extracted_files = {"pd_file": None, "mcap_file": None, "highlow_file": None}
+        # UPDATED: Added bc_file to extracted_files dictionary
+        self.extracted_files = {"pd_file": None, "mcap_file": None, "bc_file": None, "highlow_file": None}
         self.parsed_date = None
         
         # Configure logging
@@ -235,468 +232,80 @@ class NSEDownloadExtract:
         self.logger.info("NSE DOWNLOAD & EXTRACT SESSION STARTED")
         self.logger.info("=" * 80)
     
-    def setup_driver(self):
-        """Setup Chrome driver with download preferences - ENHANCED FOR CSV DOWNLOADS"""
-        chrome_options = Options()
-        
-        # Enhanced download directory settings
-        prefs = {
-            "download.default_directory": self.download_path,
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "safebrowsing.enabled": True,
-            "safebrowsing.disable_download_protection": True,
-            "profile.default_content_settings.popups": 0,
-            "profile.content_settings.pattern_pairs.*.multiple-automatic-downloads": 1,
-            "profile.default_content_setting_values.automatic_downloads": 1,
-        }
-        chrome_options.add_experimental_option("prefs", prefs)
-        
-        # Additional options for download handling
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument("--disable-web-security")
-        chrome_options.add_argument("--allow-running-insecure-content")
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option('useAutomationExtension', False)
-        
-        if self.headless:
-            chrome_options.add_argument("--headless")
-        
-        # Initialize driver
-        try:
-            self.driver = webdriver.Chrome(options=chrome_options)
-            self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            print("✅ Chrome driver initialized successfully")
-            self.logger.info("STEP 1: Chrome driver initialized successfully")
-            return True
-        except Exception as e:
-            print(f"❌ Error initializing Chrome driver: {e}")
-            self.logger.error(f"STEP 1 ERROR: Error initializing Chrome driver: {e}")
-            return False
-    
-    def check_browser_downloads(self):
-        """Check if there are any pending downloads in the browser"""
-        try:
-            # Open downloads page
-            self.driver.get("chrome://downloads/")
-            time.sleep(3)
-            
-            # Get download items
-            download_items = self.driver.execute_script("""
-                return document.querySelector('downloads-manager')
-                    .shadowRoot.querySelector('#downloadsList')
-                    .items.length;
-            """)
-            
-            print(f"📊 Browser downloads count: {download_items}")
-            
-            # Get download details if any
-            if download_items > 0:
-                download_info = self.driver.execute_script("""
-                    const downloads = document.querySelector('downloads-manager')
-                        .shadowRoot.querySelector('#downloadsList').items;
-                    return Array.from(downloads).slice(0, 3).map(item => ({
-                        fileName: item.fileName,
-                        state: item.state,
-                        filePath: item.filePath
-                    }));
-                """)
-                print(f"🔍 Recent downloads: {download_info}")
-                return download_info
-                
-        except Exception as e:
-            print(f"⚠️ Could not check browser downloads: {e}")
-        
-        return []
-
     def download_bhavcopy(self, target_date=None):
-        """Download Bhavcopy (PR) zip file for the specified date"""
+        """Download PR zip and 52 Week High Low CSV directly using URLs for the specified date"""
         if target_date is None:
             target_date = self.get_current_date_string()
         
-        if not self.setup_driver():
-            return None
-        
         try:
-            print(f"🌐 Navigating to NSE all-reports page...")
-            print(f"🗓️ Looking for data for date: {target_date}")
-            self.logger.info(f"STEP 1: Navigating to NSE all-reports page for date: {target_date}")
-            self.driver.get("https://www.nseindia.com/all-reports")
+            # Compute date formats
+            current_date = datetime.now()
+            ddmmyy = current_date.strftime("%d%m%y")
+            ddmmyyyy = current_date.strftime("%d%m%Y")
             
-            # Wait for page to load
-            WebDriverWait(self.driver, 20).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
+            # PR zip file
+            pr_filename = f"PR{ddmmyy}.zip"
+            pr_url = f"https://nsearchives.nseindia.com/archives/equities/bhavcopy/pr/{pr_filename}"
+            print(f"⬇️ Downloading PR zip: {pr_url}")
+            self.logger.info(f"STEP 1: Downloading PR zip from {pr_url}")
             
-            print("⏳ Waiting for dynamic content to load...")
-            time.sleep(8)
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.nseindia.com/',
+            }
             
-            # Find date element containing target date
-            print(f"🔍 Looking for date element: '{target_date}'")
-            date_selectors = [
-                f"//*[contains(text(), '{target_date}')]",
-                f"//*[contains(text(), '{self.get_current_date_string()}')]"
-            ]
+            pr_path = self.download_file(pr_url, os.path.join(self.download_path, pr_filename), headers)
+            if not pr_path:
+                print(f"❌ Failed to download {pr_filename}")
+                self.logger.error(f"STEP 1 ERROR: Failed to download {pr_filename}")
+                return False
             
-            date_element = None
-            for selector in date_selectors:
-                try:
-                    elements = self.driver.find_elements(By.XPATH, selector)
-                    if elements:
-                        date_element = elements[0]
-                        print(f"✅ Found date element")
-                        self.logger.info(f"STEP 1: Found date element for {target_date}")
-                        break
-                except:
-                    continue
+            # 52 Week High Low CSV
+            highlow_filename = f"CM_52_wk_High_low_{ddmmyyyy}.csv"
+            highlow_url = f"https://nsearchives.nseindia.com/content/{highlow_filename}"
+            print(f"⬇️ Downloading 52 Week High Low CSV: {highlow_url}")
+            self.logger.info(f"STEP 1: Downloading 52 Week High Low CSV from {highlow_url}")
             
-            if not date_element:
-                print("❌ Could not find date element")
-                self.logger.error(f"STEP 1 ERROR: Could not find date element for {target_date}")
-                return None
-            
-            # Find parent container with checkboxes
-            print("🔍 Looking for checkboxes container...")
-            parent_container = date_element
-            for _ in range(5):
-                try:
-                    parent_container = parent_container.find_element(By.XPATH, "..")
-                    checkboxes_in_container = parent_container.find_elements(By.XPATH, ".//input[@type='checkbox']")
-                    if len(checkboxes_in_container) > 5:
-                        print(f"✅ Found container with {len(checkboxes_in_container)} checkboxes")
-                        self.logger.info(f"STEP 1: Found container with {len(checkboxes_in_container)} checkboxes")
-                        break
-                except:
-                    break
-            
-            # Find Bhavcopy checkbox
-            print("🔍 Looking for 'Bhavcopy (PR)' checkbox...")
-            all_checkboxes = parent_container.find_elements(By.XPATH, ".//input[@type='checkbox']")
-            bhavcopy_checkbox = self.find_bhavcopy_checkbox(all_checkboxes)
-
-            if not bhavcopy_checkbox:
-                print("❌ Could not find Bhavcopy (PR) checkbox")
-                self.logger.error("STEP 1 ERROR: Could not find Bhavcopy (PR) checkbox")
-                return None
-
-            # Also find 52 Week High Low checkbox
-            print("🔍 Looking for '52 Week High Low Report' checkbox...")
-            highlow_checkbox = self.find_52wk_checkbox(all_checkboxes)
-
-            if not highlow_checkbox:
-                print("⚠️ Could not find 52 Week High Low checkbox - proceeding with bhavcopy only")
-                self.logger.warning("STEP 1: Could not find 52 Week High Low checkbox")
-            
-            # Uncheck ALL checkboxes on the entire page first
-            print("🔄 Clearing ALL checkboxes on the page...")
-            try:
-                all_page_checkboxes = self.driver.find_elements(By.XPATH, "//input[@type='checkbox']")
-                print(f"📊 Found {len(all_page_checkboxes)} total checkboxes on page")
-                
-                unchecked_count = 0
-                for checkbox in all_page_checkboxes:
-                    try:
-                        if checkbox != bhavcopy_checkbox and checkbox.is_selected():
-                            self.driver.execute_script("arguments[0].click();", checkbox)
-                            unchecked_count += 1
-                            time.sleep(0.2)
-                    except:
-                        pass
-                
-                print(f"✅ Cleared {unchecked_count} checkboxes")
-                time.sleep(1)
-                
-            except Exception as e:
-                print(f"⚠️ Error clearing checkboxes: {e}")
-            print(f"✅ Unchecked {unchecked_count} other checkboxes")
-            self.logger.info(f"STEP 1: Unchecked {unchecked_count} other checkboxes")
-            
-            # Check only Bhavcopy checkbox
-            print("☑️ Checking Bhavcopy (PR) checkbox...")
-            try:
-                self.driver.execute_script("arguments[0].scrollIntoView(true);", bhavcopy_checkbox)
-                time.sleep(1)
-                
-                if not bhavcopy_checkbox.is_selected():
-                    self.driver.execute_script("arguments[0].click();", bhavcopy_checkbox)
-                    time.sleep(2)
-                    print("✅ Bhavcopy checkbox checked")
-                    self.logger.info("STEP 1: Bhavcopy checkbox checked successfully")
-
-                # Also check 52 Week High Low checkbox if found
-                if highlow_checkbox:
-                    print("☑️ Checking 52 Week High Low Report checkbox...")
-                    self.driver.execute_script("arguments[0].scrollIntoView(true);", highlow_checkbox)
-                    time.sleep(1)
-                    
-                    if not highlow_checkbox.is_selected():
-                        self.driver.execute_script("arguments[0].click();", highlow_checkbox)
-                        time.sleep(2)
-                        print("✅ 52 Week High Low checkbox checked")
-                        self.logger.info("STEP 1: 52 Week High Low checkbox checked successfully")
-                
-                # Verify selection
-                selected_count = len([cb for cb in all_checkboxes if cb.is_selected()])
-                print(f"📊 Total selected checkboxes: {selected_count}")
-                
-            except Exception as e:
-                print(f"❌ Error checking Bhavcopy checkbox: {e}")
-                self.logger.error(f"STEP 1 ERROR: Error checking Bhavcopy checkbox: {e}")
-                return None
-            
-            # Find and click download button
-            print("🔍 Looking for download button...")
-            download_selectors = [
-                "//button[contains(text(), 'Download')]",
-                "//a[contains(text(), 'Download')]",
-                "//input[@type='submit' and @value='Download']",
-                "//button[@type='submit']"
-            ]
-            
-            download_button = None
-            for selector in download_selectors:
-                try:
-                    download_button = self.driver.find_element(By.XPATH, selector)
-                    if download_button.is_displayed() and download_button.is_enabled():
-                        print(f"✅ Found download button")
-                        break
-                except:
-                    continue
-            
-            if download_button:
-                print("⬇️ Clicking download button...")
-                self.driver.execute_script("arguments[0].click();", download_button)
-                self.logger.info("STEP 1: Download button clicked, waiting for file...")
-                
-                # Wait for download
-                possible_filenames = ["Reports-Daily-Multiple.zip", "Reports-Daily.zip"]
-                downloaded_file = None
-                
-                for filename in possible_filenames:
-                    print(f"⏳ Checking for download: {filename}")
-                    downloaded_file = self.wait_for_download(filename, timeout=30)
-                    if downloaded_file:
-                        break
-                
-                if not downloaded_file:
-                    downloaded_file = self.find_latest_zip_file()
-                
-                if downloaded_file:
-                    self.logger.info(f"STEP 1: Download completed successfully - {os.path.basename(downloaded_file)}")
-                
-                return downloaded_file
+            highlow_path = self.download_file(highlow_url, os.path.join(self.download_path, highlow_filename), headers)
+            if highlow_path:
+                self.extracted_files["highlow_file"] = highlow_path
+                self.archive_52wk_file(highlow_path)
+                print(f"✅ Downloaded and archived {highlow_filename}")
+                self.logger.info(f"STEP 1: Downloaded and archived {highlow_filename}")
             else:
-                print("❌ Could not find download button")
-                self.logger.error("STEP 1 ERROR: Could not find download button")
-                return None
-                
+                print(f"⚠️ Failed to download {highlow_filename} - proceeding without it")
+                self.logger.warning(f"STEP 1: Failed to download {highlow_filename}")
+            
+            return True
+            
         except Exception as e:
             print(f"❌ Error during download: {e}")
             self.logger.error(f"STEP 1 ERROR: Error during download: {e}")
-            return None
-        finally:
-            if self.driver:
-                self.driver.quit()
+            return False
     
-    def find_52wk_checkbox(self, checkboxes):
-        """Find the 52 Week High Low Report checkbox by inspecting surrounding text - IMPROVED VERSION"""
-        print(f"🔍 Inspecting {len(checkboxes)} checkboxes for 52 Week High Low Report...")
-        
-        for i, checkbox in enumerate(checkboxes):
-            try:
-                # Get multiple levels of context to find the right checkbox
-                contexts = []
-                
-                # Level 1: Direct parent
-                try:
-                    parent = checkbox.find_element(By.XPATH, "..")
-                    contexts.append(parent.text.lower())
-                except:
-                    pass
-                
-                # Level 2: Grandparent
-                try:
-                    grandparent = checkbox.find_element(By.XPATH, "../..")
-                    contexts.append(grandparent.text.lower())
-                except:
-                    pass
-                
-                # Level 3: Great-grandparent  
-                try:
-                    great_grandparent = checkbox.find_element(By.XPATH, "../../..")
-                    contexts.append(great_grandparent.text.lower())
-                except:
-                    pass
-                
-                # Level 4: Look for sibling elements
-                try:
-                    parent = checkbox.find_element(By.XPATH, "..")
-                    siblings = parent.find_elements(By.XPATH, "..//*")
-                    for sibling in siblings[:10]:  # Check first 10 siblings
-                        try:
-                            contexts.append(sibling.text.lower())
-                        except:
-                            pass
-                except:
-                    pass
-                
-                # Combine all contexts
-                combined_text = " ".join(contexts)
-                
-                print(f"  Checkbox #{i+1} context: {combined_text[:200]}...")  # Show first 200 chars for debugging
-                
-                # Enhanced keyword matching
-                high_low_keywords = [
-                    '52 week high low',
-                    '52week high low', 
-                    '52-week high low',
-                    '52 week high',
-                    '52 week low',
-                    'cm_52_wk_high_low',
-                    'cm 52 wk high low',
-                    '52wk high low',
-                    'week high low report'
-                ]
-                
-                # Check for any of the keyword patterns
-                text_normalized = combined_text.replace('_', ' ').replace('-', ' ').replace('\n', ' ')
-                
-                for keyword in high_low_keywords:
-                    if keyword in text_normalized:
-                        print(f"✅ Found 52 Week High Low Report checkbox #{i+1} using keyword: '{keyword}'")
-                        return checkbox
-                
-                # Alternative check: look for "52" and ("high" or "low") and "week"
-                if ('52' in combined_text and 'week' in combined_text and 
-                    ('high' in combined_text or 'low' in combined_text)):
-                    print(f"✅ Found 52 Week High Low Report checkbox #{i+1} using pattern matching")
-                    return checkbox
-                    
-            except Exception as e:
-                print(f"  Error checking checkbox #{i+1}: {e}")
-                continue
-        
-        print("❌ Could not identify 52 Week High Low Report checkbox")
-        print("🔍 Available checkbox contexts:")
-        
-        # Debug: Show all checkbox contexts
-        for i, checkbox in enumerate(checkboxes[:10]):  # Show first 10 for debugging
-            try:
-                parent = checkbox.find_element(By.XPATH, "..")
-                context = parent.text.lower()[:100]  # First 100 chars
-                print(f"  Checkbox #{i+1}: {context}")
-            except:
-                print(f"  Checkbox #{i+1}: <could not get context>")
-                
-        return None
-    
-    def find_bhavcopy_checkbox(self, checkboxes):
-        """Find the Bhavcopy (PR) checkbox by inspecting surrounding text"""
-        print(f"🔍 Inspecting {len(checkboxes)} checkboxes for Bhavcopy...")
-        
-        for i, checkbox in enumerate(checkboxes):
-            try:
-                parent = checkbox.find_element(By.XPATH, "..")
-                parent_text = parent.text.lower()
-                
-                # Get broader context
-                try:
-                    grandparent = parent.find_element(By.XPATH, "..")
-                    context_text = grandparent.text.lower()
-                except:
-                    context_text = parent_text
-                
-                combined_text = f"{parent_text} {context_text}"
-                
-                # Look for Bhavcopy and PR keywords
-                if ('bhavcopy' in combined_text or 'bhav' in combined_text) and 'pr' in combined_text:
-                    print(f"✅ Found Bhavcopy checkbox #{i+1}")
-                    return checkbox
-                elif 'pr' in combined_text and ('290825' in combined_text or '280825' in combined_text):
-                    print(f"✅ Found PR checkbox #{i+1}")
-                    return checkbox
-                    
-            except Exception as e:
-                continue
-        
-        print("❌ Could not identify Bhavcopy checkbox")
-        return None
-    
-    def wait_for_download(self, expected_filename, timeout=60):
-        """Wait for file download to complete - ENHANCED VERSION"""
-        end_time = time.time() + timeout
-        
-        print(f"🔍 Waiting for file: {expected_filename} in {self.download_path}")
-        
-        while time.time() < end_time:
-            filepath = os.path.join(self.download_path, expected_filename)
-            
-            # Check if file exists
-            if os.path.exists(filepath):
-                print(f"🔍 File found: {expected_filename}")
-                # Check if download is complete by monitoring file size
-                try:
-                    time.sleep(3)  # Wait a bit
-                    size1 = os.path.getsize(filepath)
-                    time.sleep(3)  # Wait again
-                    size2 = os.path.getsize(filepath)
-                    
-                    if size1 == size2 and size1 > 0:
-                        print(f"✅ Download completed: {expected_filename} ({size1:,} bytes)")
-                        self.logger.info(f"STEP 1: Download completed: {expected_filename} ({size1:,} bytes)")
-                        return filepath
-                    else:
-                        print(f"⏳ File still downloading... Size: {size2:,} bytes")
-                except Exception as e:
-                    print(f"⚠️ Error checking file size: {e}")
-            
-            # List current files for debugging
-            if int(time.time()) % 10 == 0:  # Every 10 seconds
-                try:
-                    current_files = os.listdir(self.download_path)
-                    print(f"📂 Current files: {current_files}")
-                except:
-                    pass
-            
-            time.sleep(1)
-        
-        print(f"❌ Timeout waiting for {expected_filename}")
-        return None
-    
-    def find_latest_zip_file(self):
-        """Find the most recently created zip file"""
+    def download_file(self, url, save_path, headers):
+        """Helper to download file using requests"""
         try:
-            zip_files = []
-            for filename in os.listdir(self.download_path):
-                if filename.lower().endswith('.zip'):
-                    filepath = os.path.join(self.download_path, filename)
-                    creation_time = os.path.getctime(filepath)
-                    zip_files.append((filepath, creation_time, filename))
-            
-            if zip_files:
-                zip_files.sort(key=lambda x: x[1], reverse=True)
-                latest_file = zip_files[0][0]
-                latest_name = zip_files[0][2]
-                print(f"✅ Found latest zip file: {latest_name}")
-                self.logger.info(f"STEP 1: Found latest zip file: {latest_name}")
-                return latest_file
+            response = requests.get(url, headers=headers)
+            if response.status_code == 200:
+                with open(save_path, 'wb') as f:
+                    f.write(response.content)
+                print(f"✅ Downloaded: {os.path.basename(save_path)} ({len(response.content):,} bytes)")
+                return save_path
             else:
-                print("❌ No zip files found")
-                self.logger.error("STEP 1 ERROR: No zip files found")
+                print(f"❌ HTTP error {response.status_code} for {url}")
                 return None
-                
         except Exception as e:
-            print(f"❌ Error finding latest zip: {e}")
-            self.logger.error(f"STEP 1 ERROR: Error finding latest zip: {e}")
+            print(f"❌ Download error for {url}: {e}")
             return None
     
-    def extract_specific_files(self, zip_filepath):
-        """Extract specific files including 52 Week High Low CSV and handle archiving"""
-        if not zip_filepath or not os.path.exists(zip_filepath):
-            print("❌ ZIP file not found")
-            self.logger.error("STEP 1 ERROR: ZIP file not found for extraction")
+    def extract_specific_files(self, pr_zip_path):
+        """Extract specific files from PR zip, handle archiving"""
+        if not pr_zip_path or not os.path.exists(pr_zip_path):
+            print("❌ PR ZIP file not found")
+            self.logger.error("STEP 1 ERROR: PR ZIP file not found for extraction")
             return []
         
         try:
@@ -707,146 +316,84 @@ class NSEDownloadExtract:
                 print(f"✅ Created Archives folder")
                 self.logger.info("STEP 1: Created Archives folder")
             
-            print(f"\n📦 Processing: {os.path.basename(zip_filepath)}")
-            self.logger.info(f"STEP 1: Processing ZIP file: {os.path.basename(zip_filepath)}")
+            print(f"\n📦 Processing PR ZIP: {os.path.basename(pr_zip_path)}")
+            self.logger.info(f"STEP 1: Processing PR ZIP file: {os.path.basename(pr_zip_path)}")
             
             extracted_csvs = []
             
-            # Extract main zip and look for files
-            with zipfile.ZipFile(zip_filepath, 'r') as main_zip:
-                file_list = main_zip.namelist()
-                print(f"📂 Files in main ZIP: {file_list}")
-                self.logger.info(f"STEP 1: Files in main ZIP: {file_list}")
+            pr_zip_name = os.path.basename(pr_zip_path)
+            actual_date = pr_zip_name[2:-4]  # PR300925.zip -> 300925
+            
+            # Set parsed_date
+            if actual_date:
+                day = actual_date[:2]
+                month = actual_date[2:4] 
+                year_yy = actual_date[4:6]
+                self.parsed_date = f"20{year_yy}-{month}-{day}"
+                print(f"📅 Set tracking date: {self.parsed_date}")
+                self.logger.info(f"STEP 1: Set tracking date: {self.parsed_date}")
+            
+            # Archive PR zip
+            archive_dest = os.path.join(archives_path, pr_zip_name)
+            shutil.copy2(pr_zip_path, archive_dest)
+            print(f"📚 Archived: {os.path.basename(archive_dest)}")
+            self.logger.info(f"STEP 1: Archived PR file: {os.path.basename(archive_dest)}")
+            
+            # UPDATED: Dynamically construct target filenames including BC file
+            if actual_date:
+                # Convert DDMMYY to DDMMYYYY for MCAP file
+                day = actual_date[:2]
+                month = actual_date[2:4] 
+                year_yy = actual_date[4:6]
+                year_yyyy = "20" + year_yy
                 
-                # Look for different types of files:
-                # 1. PR*.zip file (contains PD and MCAP files)
-                # 2. CM_52_wk_High_low*.csv (52 Week High Low report)
+                target_files = [
+                    f"MCAP{day}{month}{year_yyyy}.csv",  # MCAP30092025.csv
+                    f"Pd{actual_date}.csv",              # Pd300925.csv
+                    f"Bc{actual_date}.csv"               # Bc300925.csv (NEW)
+                ]
+                print(f"🎯 Target files: {target_files}")
+                self.logger.info(f"STEP 1: Target files for extraction: {target_files}")
+            else:
+                print("❌ Could not determine date from PR filename")
+                self.logger.error("STEP 1 ERROR: Could not determine date from PR filename")
+                return extracted_csvs  # Return what we have so far
+            
+            # Extract PD, MCAP, and BC files from PR zip
+            with zipfile.ZipFile(pr_zip_path, 'r') as pr_zip:
+                pr_file_list = pr_zip.namelist()
+                print(f"📂 Files in PR ZIP: {pr_file_list}")
+                self.logger.info(f"STEP 1: Files in PR ZIP: {pr_file_list}")
                 
-                pr_zip_name = None
-                actual_date = None
-                highlow_csv_name = None
-                
-                for filename in file_list:
-                    # Check for PR zip file
-                    if filename.startswith('PR') and filename.lower().endswith('.zip'):
-                        pr_zip_name = filename
-                        # Extract date from PR filename (e.g., PR290825.zip -> 290825)
-                        actual_date = filename[2:8]  # Extract DDMMYY
-                        print(f"🗓️ Detected actual date: {actual_date}")
-                        self.logger.info(f"STEP 1: Detected actual date from PR file: {actual_date}")
-                    
-                    # Check for 52 Week High Low CSV file
-                    elif filename.lower().startswith('cm_52_wk_high_low') and filename.lower().endswith('.csv'):
-                        highlow_csv_name = filename
-                        print(f"📈 Found 52 Week High Low CSV: {highlow_csv_name}")
-                        self.logger.info(f"STEP 1: Found 52 Week High Low CSV: {highlow_csv_name}")
-                
-                # Set parsed_date early for batch tracking
-                if actual_date:
-                    # Convert DDMMYY to YYYY-MM-DD format for database operations
-                    day = actual_date[:2]
-                    month = actual_date[2:4] 
-                    year_yy = actual_date[4:6]
-                    self.parsed_date = f"20{year_yy}-{month}-{day}"
-                    print(f"📅 Set tracking date: {self.parsed_date}")
-                    self.logger.info(f"STEP 1: Set tracking date: {self.parsed_date}")
-                
-                # Extract 52 Week High Low CSV if found
-                if highlow_csv_name:
-                    print(f"📈 Extracting 52 Week High Low CSV: {highlow_csv_name}")
-                    main_zip.extract(highlow_csv_name, self.download_path)
-                    extracted_path = os.path.join(self.download_path, highlow_csv_name)
-                    extracted_csvs.append(extracted_path)
-                    
-                    # Store file reference for database loading
-                    self.extracted_files["highlow_file"] = extracted_path
-                    print(f"✅ Extracted 52 Week High Low CSV: {highlow_csv_name}")
-                    self.logger.info(f"STEP 1: Successfully extracted 52 Week High Low CSV: {highlow_csv_name}")
-                    
-                    # Archive the 52 Week High Low file
-                    self.archive_52wk_file(extracted_path)
-                
-                # Process PR zip file for PD and MCAP files
-                if pr_zip_name:
-                    # Extract PR*.zip temporarily
-                    temp_pr_path = os.path.join(self.download_path, "temp_pr.zip")
-                    main_zip.extract(pr_zip_name, self.download_path)
-                    
-                    # Rename to standard name
-                    extracted_pr_path = os.path.join(self.download_path, pr_zip_name)
-                    if extracted_pr_path != temp_pr_path:
-                        shutil.move(extracted_pr_path, temp_pr_path)
-                    
-                    print(f"✅ Extracted: {pr_zip_name}")
-                    
-                    # Copy PR*.zip to Archives with correct date
-                    if actual_date:
-                        archive_dest = os.path.join(archives_path, f"PR{actual_date}.zip")
-                    else:
-                        archive_dest = os.path.join(archives_path, "PR_latest.zip")
-                    
-                    shutil.copy2(temp_pr_path, archive_dest)
-                    print(f"📚 Archived: {os.path.basename(archive_dest)}")
-                    self.logger.info(f"STEP 1: Archived PR file: {os.path.basename(archive_dest)}")
-                    
-                    # Dynamically construct target filenames based on detected date
-                    if actual_date:
-                        # Convert DDMMYY to DDMMYYYY for MCAP file
-                        day = actual_date[:2]
-                        month = actual_date[2:4] 
-                        year_yy = actual_date[4:6]
-                        year_yyyy = "20" + year_yy  # Assume 20xx
+                for target_file in target_files:
+                    if target_file in pr_file_list:
+                        # Extract with original name
+                        pr_zip.extract(target_file, self.download_path)
+                        extracted_path = os.path.join(self.download_path, target_file)
+                        extracted_csvs.append(extracted_path)
+                        print(f"✅ Extracted: {target_file}")
+                        self.logger.info(f"STEP 1: Successfully extracted: {target_file}")
                         
-                        target_files = [
-                            f"MCAP{day}{month}{year_yyyy}.csv",  # MCAP29082025.csv
-                            f"Pd{actual_date}.csv"              # Pd290825.csv
-                        ]
-                        print(f"🎯 Target files: {target_files}")
-                        self.logger.info(f"STEP 1: Target files for extraction: {target_files}")
-                    else:
-                        print("❌ Could not determine date from PR filename")
-                        self.logger.error("STEP 1 ERROR: Could not determine date from PR filename")
-                        return extracted_csvs  # Return what we have so far
-                    
-                    # Extract PD and MCAP files from PR zip
-                    with zipfile.ZipFile(temp_pr_path, 'r') as pr_zip:
-                        pr_file_list = pr_zip.namelist()
-                        print(f"📂 Files in PR ZIP: {pr_file_list}")
-                        self.logger.info(f"STEP 1: Files in PR ZIP: {pr_file_list}")
+                        # UPDATED: Store file references for database loading including BC file
+                        if target_file.startswith("Pd"):
+                            self.extracted_files["pd_file"] = extracted_path
+                        elif target_file.startswith("MCAP"):
+                            self.extracted_files["mcap_file"] = extracted_path
+                        elif target_file.startswith("Bc"):
+                            self.extracted_files["bc_file"] = extracted_path
                         
-                        for target_file in target_files:
-                            if target_file in pr_file_list:
-                                # Extract with original name
-                                pr_zip.extract(target_file, self.download_path)
-                                extracted_path = os.path.join(self.download_path, target_file)
-                                extracted_csvs.append(extracted_path)
-                                print(f"✅ Extracted: {target_file}")
-                                self.logger.info(f"STEP 1: Successfully extracted: {target_file}")
-                                
-                                # Store file references for database loading
-                                if target_file.startswith("Pd"):
-                                    self.extracted_files["pd_file"] = extracted_path
-                                elif target_file.startswith("MCAP"):
-                                    self.extracted_files["mcap_file"] = extracted_path
-                                
-                            else:
-                                print(f"⚠️ File not found: {target_file}")
-                                self.logger.warning(f"STEP 1: File not found: {target_file}")
-                                # List similar files for debugging
-                                similar_files = [f for f in pr_file_list if target_file[:4].lower() in f.lower()]
-                                if similar_files:
-                                    print(f"   🔍 Similar files found: {similar_files}")
-                                    self.logger.info(f"STEP 1: Similar files found: {similar_files}")
-                    
-                    # Clean up temporary PR zip
-                    try:
-                        os.remove(temp_pr_path)
-                    except:
-                        pass
-                
-                else:
-                    print("⚠️ No PR*.zip file found in main ZIP")
-                    self.logger.warning("STEP 1: No PR*.zip file found in main ZIP")
+                    else:
+                        print(f"⚠️ File not found: {target_file}")
+                        self.logger.warning(f"STEP 1: File not found: {target_file}")
+                        # List similar files for debugging
+                        similar_files = [f for f in pr_file_list if target_file[:4].lower() in f.lower()]
+                        if similar_files:
+                            print(f"   🔍 Similar files found: {similar_files}")
+                            self.logger.info(f"STEP 1: Similar files found: {similar_files}")
+            
+            # Add highlow file if downloaded
+            if self.extracted_files.get("highlow_file"):
+                extracted_csvs.append(self.extracted_files["highlow_file"])
             
             # Clean up temporary files (but preserve our extracted CSVs)
             self.cleanup_except_targets(extracted_csvs)
@@ -901,8 +448,11 @@ class NSEDownloadExtract:
                 keep_items.add(highlow_filename)
                 print(f"🔒 Protecting current day 52 Week High Low file: {highlow_filename}")
             
-            # REMOVED: The problematic block that protected ALL 52-week files
-            # This was causing previous day CM_52_wk_High_low files to be preserved
+            # UPDATED: Also protect BC file
+            if self.extracted_files.get("bc_file"):
+                bc_filename = os.path.basename(self.extracted_files["bc_file"])
+                keep_items.add(bc_filename)
+                print(f"🔒 Protecting current day BC file: {bc_filename}")
             
             deleted_count = 0
             for item in os.listdir(self.download_path):
@@ -992,14 +542,18 @@ class NSEDownloadExtract:
         self.logger.info("STEP 1: Starting download and extraction process")
         
         try:
-            zip_file = self.download_bhavcopy(target_date)
-            if not zip_file:
+            success = self.download_bhavcopy(target_date)
+            if not success:
                 print("❌ PIPELINE FAILED: Could not download files")
                 self.logger.error("PIPELINE FAILED: Could not download files")
                 self.update_batch_status(step_name, "Failed")
                 return False
             
-            csv_files = self.extract_specific_files(zip_file)
+            # Get PR path from downloaded file (assuming PR zip is always downloaded successfully)
+            pr_filename = f"PR{datetime.now().strftime('%d%m%y')}.zip"
+            pr_path = os.path.join(self.download_path, pr_filename)
+            
+            csv_files = self.extract_specific_files(pr_path)
             if not csv_files:
                 print("❌ PIPELINE FAILED: Could not extract CSV files")
                 self.logger.error("PIPELINE FAILED: Could not extract CSV files")
@@ -1037,17 +591,17 @@ class NSEDownloadExtract:
         print(f"📅 Process date: {self.parsed_date}")
         print("\n📋 COMPLETED OPERATIONS:")
         print("   ✅ Downloaded NSE files from website")
-        print("   ✅ Extracted PD, MCAP, and 52 Week High Low CSV files")
+        print("   ✅ Extracted PD, MCAP, BC, and 52 Week High Low CSV files")
         print("   ✅ Archived downloaded files")
         print("   ✅ Saved extraction info for database script")
-        print("\n🔄 NEXT STEP:")
+        print("\n📄 NEXT STEP:")
         print("   ➡️ Run nse_database_load.py to load data into database")
         print("=" * 90)
         
         self.logger.info("=" * 80)
         self.logger.info(f"DOWNLOAD & EXTRACT PIPELINE COMPLETED SUCCESSFULLY in {pipeline_duration:.2f} seconds")
         self.logger.info(f"Process date: {self.parsed_date}")
-        self.logger.info("Files ready for database loading: PD, MCAP, 52 Week High Low")
+        self.logger.info("Files ready for database loading: PD, MCAP, BC, 52 Week High Low")
         self.logger.info("Extraction info saved for database script consumption")
         self.logger.info("=" * 80)
         
@@ -1057,19 +611,18 @@ def main():
     print("📋 NSE Download & Extract Script")
     print("=" * 50)
     print("Requirements:")
-    print("   • pip install selenium requests psycopg2")
-    print("   • ChromeDriver: https://chromedriver.chromium.org/")
+    print("   • pip install requests psycopg2")
     print("   • PostgreSQL database (for batch tracking)")
     print("\n📄 Log File Generated:")
     print("   • nse_download_extract.log")
-    print("\n🔄 Next Step:")
+    print("\n📄 Next Step:")
     print("   • Run nse_database_load.py after this completes")
     print("")
     
     # Initialize download & extract pipeline
     pipeline = NSEDownloadExtract(
         download_path=r"C:\Python Code\Files",
-        headless=False  # Set to True to hide browser
+        headless=False  # Ignored since no Selenium
     )
     
     try:
@@ -1080,7 +633,7 @@ def main():
             print("\n✅ Download and extraction completed successfully!")
             print("📊 Check nse_download_extract.log for detailed operation records")
             print("💾 extraction_info.json created for database script")
-            print("🔄 Now run nse_database_load.py to complete the process")
+            print("📄 Now run nse_database_load.py to complete the process")
         else:
             print("\n❌ Download and extraction pipeline failed.")
             print("📊 Check nse_download_extract.log for details")
